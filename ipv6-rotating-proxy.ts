@@ -212,11 +212,14 @@ async function forwardRequest(
   reqHeaders: http.IncomingHttpHeaders,
   body: Buffer | null,
   sourceIpv6: string,
-): Promise<{ status: number; body: string }> {
+  clientRes: http.ServerResponse,
+): Promise<{ piped: boolean; status?: number; body?: string }> {
   const url = new URL(targetUrl);
 
   return new Promise((resolve, reject) => {
     const agent = getAgent();
+    const isStreaming = reqHeaders["accept"] === "text/event-stream" ||
+      (body && body.toString().includes('"stream":true'));
 
     const filteredHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(reqHeaders)) {
@@ -243,16 +246,30 @@ async function forwardRequest(
       timeout: 120_000,
     };
 
-    const req = https.request(options, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => {
-        resolve({
-          status: res.statusCode ?? 502,
-          body: Buffer.concat(chunks).toString(),
+    const req = https.request(options, (upRes) => {
+      if (isStreaming) {
+        // Pipe streaming response directly to client
+        clientRes.writeHead(upRes.statusCode ?? 200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
         });
-      });
-      res.on("error", reject);
+        upRes.pipe(clientRes);
+        upRes.on("end", () => resolve({ piped: true }));
+        upRes.on("error", reject);
+      } else {
+        const chunks: Buffer[] = [];
+        upRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+        upRes.on("end", () => {
+          resolve({
+            piped: false,
+            status: upRes.statusCode ?? 502,
+            body: Buffer.concat(chunks).toString(),
+          });
+        });
+        upRes.on("error", reject);
+      }
     });
 
     req.on("error", reject);
@@ -312,7 +329,7 @@ async function handleRequest(
     const attemptStart = Date.now();
 
     try {
-      const result = await forwardRequest(targetUrl, req.method ?? "POST", req.headers, body, ipv6);
+      const result = await forwardRequest(targetUrl, req.method ?? "POST", req.headers, body, ipv6, res);
       const elapsed = Date.now() - attemptStart;
 
       if (result.status === 429) {
