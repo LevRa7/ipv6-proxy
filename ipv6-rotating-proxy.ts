@@ -228,11 +228,14 @@ async function forwardRequest(
         lower !== "host" &&
         lower !== "x-proxy-target" &&
         lower !== "accept-encoding" &&
+        !lower.startsWith("x-stainless-") &&
+        lower !== "user-agent" &&
         typeof value === "string"
       ) {
         filteredHeaders[key] = value;
       }
     }
+    filteredHeaders["user-agent"] = "Mozilla/5.0 (compatible; ZenProxy/1.0)";
     filteredHeaders["host"] = url.hostname;
     filteredHeaders["accept-encoding"] = "identity";
 
