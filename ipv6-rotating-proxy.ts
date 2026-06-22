@@ -161,10 +161,33 @@ function resolveTargetUrl(
 
 // ── Agent pool + sticky IPv6 ──
 const agentPool = new Map<string, https.Agent>();
-const MAX_SOCKETS_PER_AGENT = 4;
+const MAX_SOCKETS_PER_AGENT = 100;
 let currentIpv6: string | null = null;
 
-function getAgent(ipv6: string): https.Agent {
+function getAgent(): https.Agent {
+  for (let i = 0; i < 256; i++) {
+    if (!currentIpv6) {
+      currentIpv6 = pool.next();
+    }
+    const existing = agentPool.get(currentIpv6);
+    if (!existing || existing.maxSockets > activeRequests(existing)) {
+      return getOrCreateAgent(currentIpv6);
+    }
+    // Agent saturated – try next IP
+    currentIpv6 = pool.next();
+  }
+  return getOrCreateAgent(pool.next());
+}
+
+function activeRequests(agent: https.Agent): number {
+  let total = 0;
+  for (const key of Object.keys(agent.sockets || {})) {
+    total += agent.sockets![key]!.length;
+  }
+  return total;
+}
+
+function getOrCreateAgent(ipv6: string): https.Agent {
   let agent = agentPool.get(ipv6);
   if (!agent) {
     agent = new https.Agent({
@@ -193,7 +216,7 @@ async function forwardRequest(
   const url = new URL(targetUrl);
 
   return new Promise((resolve, reject) => {
-    const agent = getAgent(sourceIpv6);
+    const agent = getAgent();
 
     const filteredHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(reqHeaders)) {
