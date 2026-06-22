@@ -236,6 +236,7 @@ async function forwardRequest(
     filteredHeaders["host"] = url.hostname;
     filteredHeaders["accept-encoding"] = "identity";
 
+    const reqTimeout = isStreaming ? 300_000 : 120_000;
     const options: https.RequestOptions = {
       hostname: url.hostname,
       port: url.port || 443,
@@ -243,7 +244,7 @@ async function forwardRequest(
       method,
       headers: filteredHeaders,
       agent,
-      timeout: 120_000,
+      timeout: reqTimeout,
     };
 
     const req = https.request(options, (upRes) => {
@@ -251,7 +252,7 @@ async function forwardRequest(
         clientRes.writeHead(upRes.statusCode ?? 200, {
           "Content-Type": upRes.headers["content-type"] || "text/event-stream",
           "Cache-Control": "no-cache",
-          "Connection": "close",
+          "Connection": "keep-alive",
           "X-Accel-Buffering": "no",
           "Transfer-Encoding": "chunked",
         });
