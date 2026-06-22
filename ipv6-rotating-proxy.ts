@@ -159,6 +159,28 @@ function resolveTargetUrl(
   return `${base}${cleanPath || ""}`;
 }
 
+// ── Agent pool + sticky IPv6 ──
+const agentPool = new Map<string, https.Agent>();
+const MAX_SOCKETS_PER_AGENT = 4;
+let currentIpv6: string | null = null;
+
+function getAgent(ipv6: string): https.Agent {
+  let agent = agentPool.get(ipv6);
+  if (!agent) {
+    agent = new https.Agent({
+      localAddress: ipv6,
+      family: 6,
+      keepAlive: true,
+      keepAliveMsecs: 60000,
+      maxSockets: MAX_SOCKETS_PER_AGENT,
+      maxFreeSockets: 2,
+      scheduling: "fifo",
+    });
+    agentPool.set(ipv6, agent);
+  }
+  return agent;
+}
+
 // ── Forwarding ──
 
 async function forwardRequest(
@@ -171,11 +193,7 @@ async function forwardRequest(
   const url = new URL(targetUrl);
 
   return new Promise((resolve, reject) => {
-    const agent = new https.Agent({
-      localAddress: sourceIpv6,
-      family: 6,
-      keepAlive: true,
-    });
+    const agent = getAgent(sourceIpv6);
 
     const filteredHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(reqHeaders)) {
@@ -264,7 +282,10 @@ async function handleRequest(
   const targetUrl = resolveTargetUrl(reqPath, req.headers, TARGET);
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const ipv6 = pool.next();
+    if (!currentIpv6) {
+      currentIpv6 = pool.next();
+    }
+    const ipv6 = currentIpv6;
     const attemptStart = Date.now();
 
     try {
@@ -273,9 +294,29 @@ async function handleRequest(
 
       if (result.status === 429) {
         pool.block(ipv6);
+        currentIpv6 = pool.next();
+        currentIpv6 = pool.next();
         log(
           `429 rate-limited src=${ipv6} attempt=${attempt + 1}/${MAX_RETRIES} ` +
           `elapsed=${elapsed}ms — rotating to next IPv6`,
+        );
+        continue;
+      }
+
+      if (result.status >= 500 && result.status < 600 && result.status !== 501) {
+        pool.block(ipv6);
+        currentIpv6 = pool.next();
+        log(
+          `${result.status} upstream error src=${ipv6} - rotating to next IPv6`,
+        );
+        continue;
+      }
+
+      if (result.status >= 500) {
+        pool.block(ipv6);
+        currentIpv6 = pool.next();
+        log(
+          `Upstream ${result.status}, rotating IPv6`,
         );
         continue;
       }
@@ -294,12 +335,12 @@ async function handleRequest(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`error src=${ipv6} attempt=${attempt + 1}/${MAX_RETRIES} msg=${msg.slice(0, 200)}`);
-      res.writeHead(502, { "Content-Type": "text/plain" });
-      res.end(`Proxy error: ${msg}`);
-      return;
+      currentIpv6 = pool.next();
+      continue;
     }
   }
 
+  currentIpv6 = null;
   res.writeHead(429, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "All IPv6 addresses are rate-limited", retryAfterMs: COOLDOWN_MS }));
   log(`429 exhausted all ${MAX_RETRIES} IPv6 addresses for ${reqPath}`);
