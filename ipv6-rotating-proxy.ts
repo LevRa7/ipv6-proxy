@@ -248,16 +248,25 @@ async function forwardRequest(
 
     const req = https.request(options, (upRes) => {
       if (isStreaming) {
-        // Pipe streaming response directly to client
         clientRes.writeHead(upRes.statusCode ?? 200, {
-          "Content-Type": "text/event-stream",
+          "Content-Type": upRes.headers["content-type"] || "text/event-stream",
           "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          "Connection": "close",
           "X-Accel-Buffering": "no",
+          "Transfer-Encoding": "chunked",
         });
-        upRes.pipe(clientRes);
-        upRes.on("end", () => resolve({ piped: true }));
-        upRes.on("error", reject);
+        upRes.on("data", (chunk: Buffer) => {
+          clientRes.write(chunk);
+        });
+        upRes.on("end", () => {
+          clientRes.end();
+          resolve({ piped: true });
+        });
+        upRes.on("error", (_err: Error) => {
+          // Stream already started — just end the response, don't reject
+          clientRes.end();
+          resolve({ piped: true });
+        });
       } else {
         const chunks: Buffer[] = [];
         upRes.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -373,6 +382,10 @@ async function handleRequest(
       );
       return;
     } catch (err: unknown) {
+      if (res.headersSent) {
+        log(`error after stream start: ${(err instanceof Error ? err.message : String(err)).slice(0, 100)}`);
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       log(`error src=${ipv6} attempt=${attempt + 1}/${MAX_RETRIES} msg=${msg.slice(0, 200)}`);
       currentIpv6 = pool.next();
