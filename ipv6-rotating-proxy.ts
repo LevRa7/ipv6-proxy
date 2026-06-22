@@ -235,7 +235,8 @@ async function forwardRequest(
         filteredHeaders[key] = value;
       }
     }
-    filteredHeaders["user-agent"] = "Mozilla/5.0 (compatible; ZenProxy/1.0)";
+    // No User-Agent — same as opencode fetch()
+    delete filteredHeaders["user-agent"];
     filteredHeaders["host"] = url.hostname;
     filteredHeaders["accept-encoding"] = "identity";
 
